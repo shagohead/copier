@@ -1,0 +1,33 @@
+methods: # Current package methods definition.
+  Receiver:
+    - arg: Argument
+    - arg: Destination
+      into: true
+
+  StructFields:
+    - arg: github.com/shagohead/copier/internal/customtypes.StructFields
+
+  ExtendedReceiver:
+    - arg: ExtendedArgument
+    # TODO: Add skip
+      except:
+        - C # Copy into all destination struct fields, except C.
+      rename:
+        B: R # Copy argument R field into receiver B field.
+
+wrappers:
+  github.com/shagohead/copier/internal/customtypes.OptInt32:
+    type: int32 # Struct value should be treated as int32 value.
+    value: .Value # Struct field contains value.
+    copyif: .Set # Boolean expression template defining if value should be copied.
+
+  github.com/shagohead/copier/internal/customtypes.OptNilInt32:
+    type: int32 # Struct value should be treated as int32 value.
+    value: .Value # Struct field contains value.
+    valid: "!{{.}}.Null" # Boolean expression template defining if value is not empty.
+    copyif: .Set # Boolean expression template defining if value should be copied.
+
+  database/sql.NullInt32:
+    type: int32
+    value: .Int32
+    valid: .Valid # Boolean expression template defining if value is not empty.

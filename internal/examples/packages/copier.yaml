@@ -1,0 +1,38 @@
+packages: # Multiple packages methods definition.
+  first: # Subfolder or fully qualified package name.
+    methods:
+      Receiver:
+        - arg: Argument
+        - arg: Destination
+          into: true
+        - arg: github.com/shagohead/copier/internal/examples/packages/second.Receiver
+        - arg: github.com/shagohead/copier/internal/examples/packages/second.Receiver
+          into: true
+
+      StructFields:
+        - arg: github.com/shagohead/copier/internal/customtypes.StructFields
+
+      ExtendedReceiver:
+        - arg: ExtendedArgument
+          except:
+            - C # Copy into all destination struct fields, except C.
+          rename:
+            B: R # Copy argument R field into receiver B field.
+
+  second: # Second subfolder package name.
+    methods:
+      Receiver:
+        - arg: Argument
+        - arg: Argument
+          into: true
+
+wrappers:
+  github.com/shagohead/copier/internal/customtypes.OptInt32:
+    type: int32 # Struct value should be treated as int32 value.
+    value: .Value # Struct field contains value.
+    copyif: .Set # Boolean expression template defining if value should be copied.
+
+  database/sql.NullInt32:
+    type: int32
+    value: .Int32
+    valid: .Valid

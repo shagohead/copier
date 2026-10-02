@@ -1,0 +1,45 @@
+package first
+
+import (
+	"github.com/shagohead/copier/internal/customtypes"
+	"github.com/shagohead/copier/internal/examples/packages/second"
+)
+
+func (d *Receiver) CopyFromArgument(s *Argument) {
+	d.SomeField = s.SomeField
+	d.IntField = s.IntField
+}
+
+func (s *Receiver) CopyIntoDestination(d *Destination) {
+	d.SomeField = s.SomeField
+	d.IntField = s.IntField
+}
+
+func (d *Receiver) CopyFrom(s *second.Receiver) {
+	d.SomeField = s.SomeField
+	d.IntField = s.IntField
+}
+
+func (s *Receiver) CopyInto(d *second.Receiver) {
+	d.SomeField = s.SomeField
+	d.IntField = s.IntField
+}
+
+func (d *StructFields) CopyFrom(s *customtypes.StructFields) {
+	if s.EventID.Set {
+		d.EventID.Valid = true
+		d.EventID.Int32 = s.EventID.Value
+	}
+	if s.ValueID.Set {
+		d.ValueID.Valid = true
+		d.ValueID.Int32 = s.ValueID.Value
+	}
+}
+
+func (d *ExtendedReceiver) CopyFromExtendedArgument(s *ExtendedArgument) {
+	if s.A.Set {
+		d.A = s.A.Value
+	}
+	d.B = s.R
+	d.D = int64(s.D)
+}
