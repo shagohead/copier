@@ -24,15 +24,20 @@ func (d *StructFields) CopyFrom(s *customtypes.StructFields) {
 }
 
 func (d *ExtendedReceiver) CopyFromExtendedArgument(s *ExtendedArgument) {
-	if s.A.Set {
-		d.A = s.A.Value
+	if s.BaseFromWrapper.Set {
+		d.BaseFromWrapper = s.BaseFromWrapper.Value
 	}
-	d.B = s.R
-	d.D = int64(s.D)
-	d.E = CustomString(s.E)
-	d.F = s.F
-	if s.G.Set {
-		d.G.Valid = !s.G.Null
-		d.G.Int32 = s.G.Value
+	d.Target = s.Source
+	d.IntToInt64 = int64(s.IntToInt64)
+	d.BaseToAlias = CustomString(s.BaseToAlias)
+	d.MapToAlias = s.MapToAlias
+	if s.Wrapper2Wrapper.Set {
+		d.Wrapper2Wrapper.Valid = !s.Wrapper2Wrapper.Null
+		d.Wrapper2Wrapper.Int32 = s.Wrapper2Wrapper.Value
 	}
+	if s.FromWrappedGetter.Set {
+		d.FromWrappedGetter = s.FromWrappedGetter.Value.String()
+	}
+	d.Int64FromTime = s.Int64FromTime.Unix()
+	d.StringFromTime = s.StringFromTime.Format("2006-01-02T15:04:05 -07:00:00")
 }

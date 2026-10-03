@@ -2,6 +2,7 @@ package local
 
 import (
 	"database/sql"
+	"net/url"
 	"time"
 
 	pkgAlias "github.com/shagohead/copier/internal/customtypes"
@@ -33,21 +34,32 @@ type CustomString string
 
 type ErrorsMap map[string][]string
 
+type OptURL struct {
+	Value url.URL
+	Set   bool
+}
+
 type ExtendedReceiver struct {
-	A int32
-	B time.Time
-	C string
-	D int64
-	E CustomString
-	F ErrorsMap
-	G sql.NullInt32
+	BaseFromWrapper   int32
+	Target            time.Time
+	Unmodified        string
+	IntToInt64        int64
+	BaseToAlias       CustomString
+	MapToAlias        ErrorsMap
+	Wrapper2Wrapper   sql.NullInt32
+	FromWrappedGetter string
+	Int64FromTime     int64
+	StringFromTime    string
 }
 
 type ExtendedArgument struct {
-	A pkgAlias.OptInt32
-	R time.Time
-	D int
-	E string
-	F map[string][]string
-	G pkgAlias.OptNilInt32
+	BaseFromWrapper   pkgAlias.OptInt32
+	Source            time.Time
+	IntToInt64        int
+	BaseToAlias       string
+	MapToAlias        map[string][]string
+	Wrapper2Wrapper   pkgAlias.OptNilInt32
+	FromWrappedGetter OptURL
+	Int64FromTime     time.Time
+	StringFromTime    time.Time
 }

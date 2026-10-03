@@ -6,7 +6,9 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"text/template"
 )
@@ -25,9 +27,8 @@ type wrapperInfo struct {
 
 // Source field prepared for reading.
 type source struct {
-	guard string // Copy only if this expression is true.
-	// FIXME: «empty means always valid»?
-	valid   string // Expression of value non-emptiness; empty means always valid.
+	guard   string // Copy only if this expression is true.
+	valid   string // Optional expression of value non-emptiness.
 	wrapped bool   // Validity defined by wrapper.
 	deref   bool   // Value can be read only if `valid`.
 	val     value
@@ -35,10 +36,6 @@ type source struct {
 
 // Destination field prepared for writing.
 type destination struct {
-	// FIXME: Возможно такое не нужно для получателя значения. А только для источника.
-	// Потому как CopyIf нужен только для проверки выполнять ли копирование из.
-	// Пустое/null значение же уже определяется параметром Valid.
-	// Еще один флаг заполненного значения для destination кажется не нужен.
 	marks   []string   // Statements marking value as set.
 	valid   string     // Assignable validity expression.
 	invalid bool       // Validity expression is negated: assign negated validity.
@@ -49,9 +46,11 @@ type destination struct {
 
 // copyField writes statements copying src into dst.
 func (g *fileGen) copyField(dst, src value) error {
-	if expr, ok := g.convert(dst.typ, src.typ, src.expr); ok {
-		fmt.Fprintf(&g.body, "%s = %s\n", dst.expr, expr)
-		return nil
+	if v, ok, err := g.convertValue(dst.typ, src); err != nil || ok {
+		if ok {
+			fmt.Fprintf(&g.body, "%s = %s\n", dst.expr, v.expr)
+		}
+		return err
 	}
 	in, err := g.source(src)
 	if err != nil {
@@ -61,8 +60,11 @@ func (g *fileGen) copyField(dst, src value) error {
 	if err != nil {
 		return err
 	}
-	assign, err := g.assign(out, in.val)
+	assign, ok, err := g.assign(out, in.val)
 	if err != nil {
+		return err
+	}
+	if !ok {
 		return fmt.Errorf("cannot copy %s (%s) into %s (%s)",
 			src.expr, g.typeString(src.typ), dst.expr, g.typeString(dst.typ))
 	}
@@ -99,27 +101,62 @@ func (g *fileGen) copyField(dst, src value) error {
 	return nil
 }
 
+// copySet writes statement setting boolean dst to true, if src is set:
+// wrapper CopyIf expression is true, or slice or map is not nil.
+func (g *fileGen) copySet(dst, src value) error {
+	if b, ok := dst.typ.Underlying().(*types.Basic); !ok || b.Info()&types.IsBoolean == 0 {
+		return fmt.Errorf("destination %s (%s) is not boolean", dst.expr, g.typeString(dst.typ))
+	}
+	w, err := g.wrapperOf(src.typ)
+	if err != nil {
+		return err
+	}
+	var expr string
+	switch {
+	case w != nil && w.CopyIf != "":
+		if expr, err = render(w.CopyIf, src.expr); err != nil {
+			return fmt.Errorf("copyif: %v", err)
+		}
+		// Expression is typed bool, which is not assignable to bool alias.
+		if !types.Identical(dst.typ, types.Typ[types.Bool]) {
+			expr = g.conversion(dst.typ, expr)
+		}
+	case w != nil:
+		return fmt.Errorf("source %s (%s) wrapper has no copyif", src.expr, g.typeString(src.typ))
+	default:
+		switch src.typ.Underlying().(type) {
+		case *types.Slice, *types.Map:
+			expr = src.expr + " != nil"
+		default:
+			return fmt.Errorf("source %s (%s) is neither wrapper with copyif, slice or map",
+				src.expr, g.typeString(src.typ))
+		}
+	}
+	fmt.Fprintf(&g.body, "%s = %s\n", dst.expr, expr)
+	return nil
+}
+
 // assign returns statement assigning val into destination.
-func (g *fileGen) assign(out destination, val value) (string, error) {
-	if expr, ok := g.convert(out.val.typ, val.typ, val.expr); ok {
-		return out.val.expr + " = " + expr, nil
+func (g *fileGen) assign(out destination, val value) (string, bool, error) {
+	if v, ok, err := g.convertValue(out.val.typ, val); err != nil || ok {
+		return out.val.expr + " = " + v.expr, ok, err
 	}
 	if out.elem == nil {
-		return "", fmt.Errorf("not convertible")
+		return "", false, nil
 	}
-	expr, ok := g.convert(out.elem, val.typ, val.expr)
-	if !ok {
-		return "", fmt.Errorf("not convertible")
+	v, ok, err := g.convertValue(out.elem, val)
+	if err != nil || !ok {
+		return "", false, err
 	}
-	// FIXME: Выглядит лишним после вызова convert четырьмя строками выше.
-	if expr == val.expr && !types.Identical(out.elem, val.typ) {
-		expr = g.conversion(out.elem, expr)
+	// Type of new(expr) is inferred from expr, which may be only assignable
+	// to the element type (like unnamed map into named map type).
+	if !types.Identical(out.elem, v.typ) {
+		v.expr = g.conversion(out.elem, v.expr)
 	}
-	// FIXME: В тестах поймать следующие кейсы.
 	if g.newExpr() {
-		return fmt.Sprintf("%s = new(%s)", out.val.expr, expr), nil
+		return fmt.Sprintf("%s = new(%s)", out.val.expr, v.expr), true, nil
 	}
-	return fmt.Sprintf("{\nv := %s\n%s = &v\n}", expr, out.val.expr), nil
+	return fmt.Sprintf("{\nv := %s\n%s = &v\n}", v.expr, out.val.expr), true, nil
 }
 
 func (g *fileGen) source(src value) (source, error) {
@@ -188,37 +225,67 @@ func (g *fileGen) destination(dst value) (destination, error) {
 	return destination{val: dst}, nil
 }
 
-// convert returns expression of src converted into dst type.
-func (g *fileGen) convert(dst, src types.Type, x string) (string, bool) {
-	if types.AssignableTo(src, dst) {
-		return x, true
+// convertValue returns src converted into dst type,
+// directly or through one of the source type getters.
+func (g *fileGen) convertValue(dst types.Type, src value) (value, bool, error) {
+	if v, ok := g.convert(dst, src); ok {
+		return v, true, nil
 	}
-	du, su := dst.Underlying(), src.Underlying()
+	getters, err := g.gettersOf(src.typ)
+	if err != nil {
+		return value{}, false, err
+	}
+	// Getters of exactly matching types are preferred over converted ones.
+	for _, exact := range []bool{true, false} {
+		for _, gt := range getters {
+			if exact != types.Identical(dst, gt.typ) {
+				continue
+			}
+			expr, err := render(gt.expr, src.expr)
+			if err != nil {
+				return value{}, false, fmt.Errorf("getter %s: %v", gt.expr, err)
+			}
+			if v, ok := g.convert(dst, value{expr, gt.typ}); ok {
+				return v, true, nil
+			}
+		}
+	}
+	return value{}, false, nil
+}
+
+// convert returns src converted into dst type.
+func (g *fileGen) convert(dst types.Type, src value) (value, bool) {
+	if types.AssignableTo(src.typ, dst) {
+		return src, true
+	}
+	// Building conversion registers imports, so it is made only when used.
+	converted := func() value { return value{g.conversion(dst, src.expr), dst} }
+	du, su := dst.Underlying(), src.typ.Underlying()
 	if db, ok := du.(*types.Basic); ok {
 		if sb, ok := su.(*types.Basic); ok && kind(db) != 0 && kind(db) == kind(sb) {
-			return g.conversion(dst, x), true
+			return converted(), true
 		}
-		return "", false
+		return value{}, false
 	}
 	if types.Identical(du, su) {
-		return g.conversion(dst, x), true
+		return converted(), true
 	}
 	switch d := du.(type) {
 	case *types.Slice:
 		if s, ok := su.(*types.Array); ok && types.Identical(d.Elem(), s.Elem()) {
 			// Clone avoids aliasing of source array memory.
-			x = g.importName("slices", "slices") + ".Clone(" + x + "[:])"
-			if !types.AssignableTo(types.NewSlice(s.Elem()), dst) {
-				x = g.conversion(dst, x)
+			v := value{g.importName("slices", "slices") + ".Clone(" + src.expr + "[:])", types.NewSlice(s.Elem())}
+			if !types.AssignableTo(v.typ, dst) {
+				v = value{g.conversion(dst, v.expr), dst}
 			}
-			return x, true
+			return v, true
 		}
 	case *types.Array:
 		if s, ok := su.(*types.Slice); ok && types.Identical(d.Elem(), s.Elem()) {
-			return g.conversion(dst, x), true
+			return converted(), true
 		}
 	}
-	return "", false
+	return value{}, false
 }
 
 // conversion returns conversion expression of x into type t.
@@ -252,19 +319,49 @@ func kind(b *types.Basic) int {
 
 var selectorChain = regexp.MustCompile(`^(\.[\pL_][\pL\pN_]*)+$`)
 
+// typeKeys returns config keys which may refer to type t:
+// full path ("net/url.URL"), qualified name ("url.URL")
+// and name of the generated package type ("Name").
+func (g *fileGen) typeKeys(t types.Type) []string {
+	switch t := t.(type) {
+	case *types.Basic:
+		return []string{t.Name()}
+	case *types.Named:
+		obj := t.Obj()
+		if obj.Pkg() == nil {
+			return []string{obj.Name()}
+		}
+		keys := []string{obj.Pkg().Path() + "." + obj.Name()}
+		if obj.Pkg().Name() != obj.Pkg().Path() {
+			keys = append(keys, obj.Pkg().Name()+"."+obj.Name())
+		}
+		if obj.Pkg() == g.pkg.Types {
+			keys = append(keys, obj.Name())
+		}
+		return keys
+	}
+	return nil
+}
+
+// configOf returns config value of type t from m.
+func configOf[T any](g *fileGen, m map[string]T, t types.Type) (string, T, bool) {
+	for _, key := range g.typeKeys(t) {
+		if v, ok := m[key]; ok {
+			return key, v, true
+		}
+	}
+	var zero T
+	return "", zero, false
+}
+
 // wrapperOf returns wrapper config of type t or nil.
 func (g *fileGen) wrapperOf(t types.Type) (*wrapperInfo, error) {
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
-		return nil, nil
-	}
-	key := named.Obj().Pkg().Path() + "." + named.Obj().Name()
-	if w, ok := g.wrappers[key]; ok {
-		return w, nil
-	}
-	w, ok := g.cfg.Wrappers[key]
+	key, w, ok := configOf(g, g.cfg.Wrappers, t)
 	if !ok {
 		return nil, nil
+	}
+	if info, ok := g.wrappers[key]; ok {
+		return info, nil
 	}
 	info, err := g.resolveWrapper(t, w)
 	if err != nil {
@@ -274,26 +371,47 @@ func (g *fileGen) wrapperOf(t types.Type) (*wrapperInfo, error) {
 	return info, nil
 }
 
-func (g *fileGen) resolveWrapper(t types.Type, w wrapper) (*wrapperInfo, error) {
-	if w.Getter != "" || w.Setter != "" {
-		return nil, fmt.Errorf("getter and setter are not supported")
+// Getter of alternative value type.
+type getter struct {
+	expr string
+	typ  types.Type
+}
+
+// gettersOf returns getters of type t sorted by their type names.
+func (g *fileGen) gettersOf(t types.Type) ([]getter, error) {
+	key, m, ok := configOf(g, g.cfg.Getters, t)
+	if !ok {
+		return nil, nil
 	}
+	if getters, ok := g.getters[key]; ok {
+		return getters, nil
+	}
+	getters := make([]getter, 0, len(m))
+	for _, name := range slices.Sorted(maps.Keys(m)) {
+		typ, err := g.parseType(name)
+		if err != nil {
+			return nil, fmt.Errorf("getters %s: %v", key, err)
+		}
+		getters = append(getters, getter{m[name], typ})
+	}
+	g.getters[key] = getters
+	return getters, nil
+}
+
+func (g *fileGen) resolveWrapper(t types.Type, w wrapper) (*wrapperInfo, error) {
 	if w.Value == "" {
 		return nil, fmt.Errorf("value is not defined")
 	}
 	info := &wrapperInfo{wrapper: w}
-	if selectorChain.MatchString(w.Value) {
-		info.typ = t
-		for name := range strings.SplitSeq(w.Value[1:], ".") {
-			obj, _, _ := types.LookupFieldOrMethod(info.typ, true, g.pkg.Types, name)
-			f, ok := obj.(*types.Var)
-			if !ok {
-				return nil, fmt.Errorf("value: field %s not found in %s", name, g.typeString(info.typ))
-			}
-			info.typ = f.Type()
+	var err error
+	if info.typ, err = g.selectorType(t, w.Value); err != nil {
+		return nil, fmt.Errorf("value: %v", err)
+	}
+	for option, expr := range map[string]string{"valid": w.Valid, "copyif": w.CopyIf} {
+		if _, err := g.selectorType(t, expr); err != nil {
+			return nil, fmt.Errorf("%s: %v", option, err)
 		}
 	}
-	// FIXME: Возможно это лишнее и достаточно автоопредленного типа.
 	if w.Type != "" {
 		typ, err := g.parseType(w.Type)
 		if err != nil {
@@ -308,6 +426,23 @@ func (g *fileGen) resolveWrapper(t types.Type, w wrapper) (*wrapperInfo, error) 
 		return nil, fmt.Errorf("type is required for value %q", w.Value)
 	}
 	return info, nil
+}
+
+// selectorType returns type of fields selector shorthand (like ".A.B")
+// applied to t, or nil if expr is not a fields selector.
+func (g *fileGen) selectorType(t types.Type, expr string) (types.Type, error) {
+	if !selectorChain.MatchString(expr) {
+		return nil, nil
+	}
+	for name := range strings.SplitSeq(expr[1:], ".") {
+		obj, _, _ := types.LookupFieldOrMethod(t, true, g.pkg.Types, name)
+		f, ok := obj.(*types.Var)
+		if !ok {
+			return nil, fmt.Errorf("field %s not found in %s", name, g.typeString(t))
+		}
+		t = f.Type()
+	}
+	return t, nil
 }
 
 // parseType parses type string, like "*[]path/to/pkg.Name".
@@ -332,7 +467,7 @@ func (g *fileGen) parseType(s string) (types.Type, error) {
 		if obj = types.Universe.Lookup(name); obj == nil {
 			obj = g.pkg.Types.Scope().Lookup(name)
 		}
-	} else if p := g.index[pkgPath]; p != nil {
+	} else if p := g.lookupPkg(pkgPath); p != nil {
 		obj = p.Scope().Lookup(name)
 	} else {
 		return nil, fmt.Errorf("package %s not loaded", pkgPath)
@@ -344,9 +479,29 @@ func (g *fileGen) parseType(s string) (types.Type, error) {
 	return tn.Type(), nil
 }
 
+// lookupPkg returns loaded package by path or by unique name.
+func (g *fileGen) lookupPkg(pathOrName string) *types.Package {
+	if p := g.index[pathOrName]; p != nil {
+		return p
+	}
+	var found *types.Package
+	for _, p := range g.index {
+		if p.Name() == pathOrName {
+			if found != nil {
+				return nil
+			}
+			found = p
+		}
+	}
+	return found
+}
+
 // render executes expression template with x as data.
 // Expression starting with dot is a shorthand for selector of x.
 func render(tmpl, x string) (string, error) {
+	if strings.HasPrefix(x, "*") {
+		x = "(" + x + ")"
+	}
 	if strings.HasPrefix(tmpl, ".") {
 		return x + tmpl, nil
 	}

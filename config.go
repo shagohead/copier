@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
@@ -10,9 +11,10 @@ import (
 
 // Root config.
 type config struct {
-	Packages ordered[pkgMethods] `yaml:"packages"` // Methods of multiple packages.
-	Methods  ordered[[]method]   `yaml:"methods"`  // Methods of the current package.
-	Wrappers map[string]wrapper  `yaml:"wrappers"` // Wrappers by full type path.
+	Packages ordered[pkgMethods]          `yaml:"packages"` // Methods of multiple packages.
+	Methods  ordered[[]method]            `yaml:"methods"`  // Methods of the current package.
+	Getters  map[string]map[string]string `yaml:"getters"`  // Getters of alternative value types.
+	Wrappers map[string]wrapper           `yaml:"wrappers"` // Wrappers by full type path.
 }
 
 // Methods of single package.
@@ -23,10 +25,50 @@ type pkgMethods struct {
 // Copying method description.
 type method struct {
 	Argument string            `yaml:"arg"`    // Method argument type path.
+	Mode     mode              `yaml:"mode"`   // Generation mode, FullCopy by default.
 	Into     bool              `yaml:"into"`   // Copy from receiver into argument.
 	Rename   map[string]string `yaml:"rename"` // Map receiver to argument field names.
-	Except   []string          `yaml:"except"` // Copy into all destination fields, except these.
-	Skip     []string          `yaml:"skip"`   // Copy from all source fields, skipping these.
+	Except   fieldSet          `yaml:"except"` // Copy into all destination fields, except these.
+	Skip     fieldSet          `yaml:"skip"`   // Copy from all source fields, skipping these.
+}
+
+// Method generation mode.
+type mode string
+
+const (
+	// Copy values of source fields into destination fields.
+	FullCopy mode = "FullCopy"
+	// Set boolean destination fields to true, if source fields are set.
+	// Source field is set if wrapper CopyIf expression is true,
+	// or slice or map is not nil.
+	OnlySet mode = "OnlySet"
+)
+
+// List of field names, or all unmatched fields if defined as boolean true.
+type fieldSet struct {
+	All   bool
+	Names []string
+}
+
+// has reports if field matched with name is in set.
+func (s fieldSet) has(name string) bool {
+	return slices.Contains(s.Names, name)
+}
+
+// hasUnmatched reports if field without match is in set.
+func (s fieldSet) hasUnmatched(name string) bool {
+	return s.All || s.has(name)
+}
+
+func (s *fieldSet) UnmarshalYAML(node ast.Node) error {
+	switch n := node.(type) {
+	case *ast.NullNode:
+		return nil
+	case *ast.BoolNode:
+		s.All = n.Value
+		return nil
+	}
+	return yaml.NodeToValue(node, &s.Names)
 }
 
 // Wrapper of type with some additional logic:
@@ -40,8 +82,6 @@ type wrapper struct {
 	Value  string `yaml:"value"`  // Path to field with value.
 	Valid  string `yaml:"valid"`  // Expression determining «emptyness» of value.
 	CopyIf string `yaml:"copyif"` // Copy if expression evaluates to true.
-	Getter string `yaml:"getter"` // Value getter method.
-	Setter string `yaml:"setter"` // Value setter method.
 }
 
 // Mapping which preserves keys order of yaml document.

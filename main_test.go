@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-yaml"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -38,11 +39,29 @@ func TestExamples(t *testing.T) {
 	}
 }
 
+func BenchmarkGenerate(b *testing.B) {
+	dir := "internal/examples/local"
+	cfg, err := configFromFile(filepath.Join(dir, "copier.yaml"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for b.Loop() {
+		files, err := generate(cfg, dir)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(files) == 0 {
+			b.Fatal("no files generated")
+		}
+	}
+}
+
 func TestGenerate(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		meth method
 		code string
+		gett map[string]map[string]string
 		wrap map[string]wrapper
 		fail string
 		want string
@@ -148,7 +167,7 @@ func TestGenerate(t *testing.T) {
 		},
 		{
 			name: "rename except skip",
-			meth: method{Rename: map[string]string{"A": "B"}, Except: []string{"C"}, Skip: []string{"D"}},
+			meth: method{Rename: map[string]string{"A": "B"}, Except: fieldSet{Names: []string{"C"}}, Skip: fieldSet{Names: []string{"D"}}},
 			code: `
 			type Receiver struct {
 				A int
@@ -181,7 +200,7 @@ func TestGenerate(t *testing.T) {
 		},
 		{
 			name: "unknown skip",
-			meth: method{Skip: []string{"X"}},
+			meth: method{Skip: fieldSet{Names: []string{"X"}}},
 			code: `
 			type Receiver struct{}
 			type Argument struct{}
@@ -190,12 +209,190 @@ func TestGenerate(t *testing.T) {
 		},
 		{
 			name: "unknown except",
-			meth: method{Except: []string{"X"}},
+			meth: method{Except: fieldSet{Names: []string{"X"}}},
 			code: `
 			type Receiver struct{}
 			type Argument struct{}
 			`,
 			fail: "except: unknown field X",
+		},
+		{
+			name: "except all",
+			meth: method{Except: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A, B, C int }
+			type Argument struct { B int }
+			`,
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.B = s.B
+			}`,
+		},
+		{
+			name: "except all into",
+			meth: method{Into: true, Except: fieldSet{All: true}},
+			code: `
+			type Receiver struct { B int }
+			type Argument struct { A, B, C int }
+			`,
+			want: `func (s *Receiver) CopyIntoArgument(d *Argument) {
+				d.B = s.B
+			}`,
+		},
+		{
+			name: "except all with unused source",
+			meth: method{Except: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A, B int }
+			`,
+			fail: "source field B has no destination field",
+		},
+		{
+			name: "except all with names",
+			meth: method{Except: fieldSet{All: true}, Skip: fieldSet{Names: []string{"B"}}},
+			code: `
+			type Receiver struct { A, C int }
+			type Argument struct { A, B int }
+			`,
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.A = s.A
+			}`,
+		},
+		{
+			name: "skip all",
+			meth: method{Skip: fieldSet{All: true}},
+			code: `
+			type Receiver struct { B int }
+			type Argument struct { A, B, C int }
+			`,
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.B = s.B
+			}`,
+		},
+		{
+			name: "skip all into",
+			meth: method{Into: true, Skip: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A, B, C int }
+			type Argument struct { B int }
+			`,
+			want: `func (s *Receiver) CopyIntoArgument(d *Argument) {
+				d.B = s.B
+			}`,
+		},
+		{
+			name: "skip all with missing source",
+			meth: method{Skip: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A, B int }
+			type Argument struct { A int }
+			`,
+			fail: "destination field B has no source field",
+		},
+		{
+			name: "skip all into with missing source",
+			meth: method{Into: true, Skip: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A, B int }
+			`,
+			fail: "destination field B has no source field",
+		},
+		{
+			name: "except and skip all",
+			meth: method{Except: fieldSet{All: true}, Skip: fieldSet{All: true}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: "except and skip cannot be both true",
+		},
+		{
+			name: "only set",
+			meth: method{Mode: OnlySet},
+			code: `
+			type Receiver struct {
+				A bool
+				B Flag
+				C bool
+				D Flag
+				E bool
+				F bool
+			}
+			type Argument struct {
+				A OptInt32
+				B OptInt32
+				C []int
+				D map[string]int
+				E OptNil
+				F Bytes
+			}
+			type Flag bool
+			type Bytes []byte
+			type OptInt32 struct { Value int32; Set bool }
+			type OptNil struct { Value int32; Null bool }
+			`,
+			wrap: map[string]wrapper{
+				"OptInt32": {Value: ".Value", CopyIf: ".Set"},
+				"OptNil":   {Value: ".Value", CopyIf: "!{{.}}.Null"},
+			},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.A = s.A.Set
+				d.B = Flag(s.B.Set)
+				d.C = s.C != nil
+				d.D = s.D != nil
+				d.E = !s.E.Null
+				d.F = s.F != nil
+			}`,
+		},
+		{
+			name: "only set into",
+			meth: method{Mode: OnlySet, Into: true, Except: fieldSet{All: true}},
+			code: `
+			type Receiver struct { A []int }
+			type Argument struct { A, B bool }
+			`,
+			want: `func (s *Receiver) CopyIntoArgument(d *Argument) {
+				d.A = s.A != nil
+			}`,
+		},
+		{
+			name: "only set/not boolean",
+			meth: method{Mode: OnlySet},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A []int }
+			`,
+			fail: "destination d.A (int) is not boolean",
+		},
+		{
+			name: "only set/not set-able",
+			meth: method{Mode: OnlySet},
+			code: `
+			type Receiver struct { A bool }
+			type Argument struct { A *int }
+			`,
+			fail: "source s.A (*int) is neither wrapper with copyif, slice or map",
+		},
+		{
+			name: "only set/wrapper without copyif",
+			meth: method{Mode: OnlySet},
+			code: `
+			type Receiver struct { A bool }
+			type Argument struct { A Null }
+			type Null struct { Value int; Valid bool }
+			`,
+			wrap: map[string]wrapper{"Null": {Value: ".Value", Valid: ".Valid"}},
+			fail: "source s.A (Null) wrapper has no copyif",
+		},
+		{
+			name: "unknown mode",
+			meth: method{Mode: "Partial"},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: `unknown mode "Partial"`,
 		},
 		{
 			name: "wrapper/dst",
@@ -381,6 +578,78 @@ func TestGenerate(t *testing.T) {
 				}
 			}`,
 		},
+		{
+			name: "getters",
+			code: `
+			import "time"
+
+			type Receiver struct {
+				Epoch int64
+				Repr string
+			}
+			type Argument struct {
+				Epoch time.Time
+				Repr time.Time
+			}
+			`,
+			gett: map[string]map[string]string{"time.Time": {
+				"int64":  ".Unix()",
+				"string": `.Format("2006-01-02T15:04:05 -07:00:00")`,
+			}},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.Epoch = s.Epoch.Unix()
+				d.Repr = s.Repr.Format("2006-01-02T15:04:05 -07:00:00")
+			}`,
+		},
+		{
+			name: "getters/ptr",
+			code: `
+			import "time"
+
+			type Receiver struct {
+				FromPtr int64
+				IntoPtr *int64
+			}
+			type Argument struct {
+				FromPtr *time.Time
+				IntoPtr time.Time
+			}
+			`,
+			gett: map[string]map[string]string{"time.Time": {"int64": ".Unix()"}},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				if s.FromPtr != nil {
+					d.FromPtr = (*s.FromPtr).Unix()
+				}
+				d.IntoPtr = new(s.IntoPtr.Unix())
+			}`,
+		},
+		{
+			name: "wrapper -> getter",
+			code: `
+			import "net/url"
+
+			type Receiver struct {
+		 		X string
+				Y string
+			}
+			type Argument struct {
+		 		X url.URL
+				Y OptURL
+			}
+			type OptURL struct {
+				Value url.URL
+				Set bool
+			}
+			`,
+			gett: map[string]map[string]string{"net/url.URL": {"string": ".String()"}},
+			wrap: map[string]wrapper{"OptURL": {Value: ".Value", CopyIf: ".Set"}},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.X = s.X.String()
+				if s.Y.Set {
+					d.Y = s.Y.Value.String()
+				}
+			}`,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Logf("-- %s --", tt.name) // Usefull in vim errors.
@@ -395,6 +664,7 @@ func TestGenerate(t *testing.T) {
 			tt.meth.Argument = "Argument"
 			cfg := &config{
 				Methods:  ordered[[]method]{{Key: "Receiver", Value: []method{tt.meth}}},
+				Getters:  tt.gett,
 				Wrappers: tt.wrap,
 			}
 			files, err := generate(cfg, dir)
@@ -415,5 +685,31 @@ func TestGenerate(t *testing.T) {
 				t.Errorf("mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestFieldSetYAML(t *testing.T) {
+	var cfg config
+	err := yaml.Unmarshal([]byte(`
+methods:
+  Receiver:
+    - arg: A
+      except: true
+    - arg: B
+      skip: [X, Y]
+    - arg: C
+      except:
+      mode: OnlySet
+`), &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []method{
+		{Argument: "A", Except: fieldSet{All: true}},
+		{Argument: "B", Skip: fieldSet{Names: []string{"X", "Y"}}},
+		{Argument: "C", Mode: OnlySet},
+	}
+	if diff := cmp.Diff(want, cfg.Methods[0].Value, cmp.AllowUnexported(method{}, fieldSet{})); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }

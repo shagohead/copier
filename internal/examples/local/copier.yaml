@@ -11,9 +11,17 @@ methods: # Current package methods definition.
     - arg: ExtendedArgument
     # TODO: Add skip
       except:
-        - C # Copy into all destination struct fields, except C.
+        - Unmodified # Copy into all destination struct fields, except Unmodified.
       rename:
-        B: R # Copy argument R field into receiver B field.
+        Target: Source # Copy argument Source field into receiver Target field.
+
+getters: # Alternative types representation for source values.
+  net/url.URL:
+    string: .String()
+
+  time.Time: # Can be used as: time.Time, int64, string.
+    int64: .Unix()
+    string: .Format("2006-01-02T15:04:05 -07:00:00")
 
 wrappers:
   github.com/shagohead/copier/internal/customtypes.OptInt32:
@@ -31,3 +39,7 @@ wrappers:
     type: int32
     value: .Int32
     valid: .Valid # Boolean expression template defining if value is not empty.
+
+  OptURL:
+    value: .Value # -> url.URL -> getters
+    copyif: .Set

@@ -84,7 +84,7 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 		for _, t := range targets {
 			t.pkg = nil
 			for _, pkg := range pkgs {
-				// FIXME: Проверить как будет работать с package import path в качестве ключа.
+				// TODO: Проверить как будет работать с package import path в качестве ключа (t.dir).
 				if t.dir != "" && realpath(pkg.Dir) == t.dir || t.dir == "" && pkg.PkgPath == t.pattern {
 					t.pkg = pkg
 					break
@@ -121,7 +121,6 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 	if pkgs, err = packages.Load(pcfg, patterns...); err != nil {
 		return nil, err
 	}
-	// FIXME: Заного заполняются targets?
 	if err := match(pkgs); err != nil {
 		return nil, err
 	}
@@ -157,6 +156,7 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 			imports:  make(map[string]string),
 			methods:  make(map[string]bool),
 			wrappers: make(map[string]*wrapperInfo),
+			getters:  make(map[string][]getter),
 		}
 		for _, rcv := range t.methods {
 			for _, m := range rcv.Value {
@@ -203,6 +203,7 @@ type fileGen struct {
 	imports  map[string]string         // Import names by path.
 	methods  map[string]bool           // Generated methods.
 	wrappers map[string]*wrapperInfo
+	getters  map[string][]getter
 	body     bytes.Buffer
 }
 
@@ -256,10 +257,18 @@ func (g *fileGen) method(rname string, m method) error {
 	if err := checkNames("rename", m.Rename, afields, false); err != nil {
 		return err
 	}
-	if err := checkNames("except", m.Except, dstFields, true); err != nil {
+	switch m.Mode {
+	case "", FullCopy, OnlySet:
+	default:
+		return fmt.Errorf("unknown mode %q, use %s or %s", m.Mode, FullCopy, OnlySet)
+	}
+	if m.Except.All && m.Skip.All {
+		return fmt.Errorf("except and skip cannot be both true")
+	}
+	if err := checkNames("except", m.Except.Names, dstFields, true); err != nil {
 		return err
 	}
-	if err := checkNames("skip", m.Skip, srcFields, true); err != nil {
+	if err := checkNames("skip", m.Skip.Names, srcFields, true); err != nil {
 		return err
 	}
 
@@ -285,16 +294,26 @@ func (g *fileGen) method(rname string, m method) error {
 			}
 			used[an] = true
 		}
-		if dst != nil && slices.Contains(m.Except, dst.Name()) || src != nil && slices.Contains(m.Skip, src.Name()) {
+		if dst != nil && m.Except.has(dst.Name()) || src != nil && m.Skip.has(src.Name()) {
 			continue
 		}
 		if af == nil {
 			if m.Into {
+				if m.Skip.All {
+					continue
+				}
 				return fmt.Errorf("source field %s has no destination field, add it into skip or rename", rf.Name())
+			}
+			if m.Except.All {
+				continue
 			}
 			return fmt.Errorf("destination field %s has no source field, add it into except or rename", rf.Name())
 		}
-		err := g.copyField(
+		copyField := g.copyField
+		if m.Mode == OnlySet {
+			copyField = g.copySet
+		}
+		err := copyField(
 			value{dstName + "." + dst.Name(), dst.Type()},
 			value{srcName + "." + src.Name(), src.Type()},
 		)
@@ -307,10 +326,10 @@ func (g *fileGen) method(rname string, m method) error {
 			continue
 		}
 		if m.Into {
-			if !slices.Contains(m.Except, af.Name()) {
+			if !m.Except.hasUnmatched(af.Name()) {
 				return fmt.Errorf("destination field %s has no source field, add it into except or rename", af.Name())
 			}
-		} else if !slices.Contains(m.Skip, af.Name()) {
+		} else if !m.Skip.hasUnmatched(af.Name()) {
 			return fmt.Errorf("source field %s has no destination field, add it into skip or rename", af.Name())
 		}
 	}
