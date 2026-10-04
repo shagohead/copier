@@ -452,19 +452,49 @@ func TestGenerate(t *testing.T) {
 			}`,
 		},
 		{
-			name: "wrapper/dst-valid",
+			name: "wrapper/dst-valid-empty",
 			code: `
-			type Receiver struct { A Int32X }
-			type Argument struct { A int32 }
-			type Int32X struct { Int32Value int32; Valid bool }
+			type Receiver struct {
+				Alias NullString
+				Opt   NullString
+				Int   NullInt
+				Bool  NullBool
+				Ptr   NullString
+			}
+			type Argument struct {
+				Alias Str
+				Opt   OptString
+				Int   int
+				Bool  bool
+				Ptr   *string
+			}
+			type Str string
+			type NullString struct { String string; Valid bool }
+			type NullInt struct { Int int; Valid bool }
+			type NullBool struct { Bool bool; Valid bool }
+			type OptString struct { Value string; Set bool }
 			`,
-			wrap: map[string]wrapper{"example.Int32X": {
-				Value: ".Int32Value",
-				Valid: ".Valid",
-			}},
+			wrap: map[string]wrapper{
+				"NullString": {Value: ".String", Valid: ".Valid"},
+				"NullInt":    {Value: ".Int", Valid: ".Valid"},
+				"NullBool":   {Value: ".Bool", Valid: ".Valid"},
+				"OptString":  {Value: ".Value", CopyIf: ".Set"},
+			},
 			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
-				d.A.Valid = true
-				d.A.Int32Value = s.A
+				d.Alias.Valid = s.Alias != ""
+				d.Alias.String = string(s.Alias)
+				if s.Opt.Set {
+					d.Opt.Valid = s.Opt.Value != ""
+					d.Opt.String = s.Opt.Value
+				}
+				d.Int.Valid = true
+				d.Int.Int = s.Int
+				d.Bool.Valid = true
+				d.Bool.Bool = s.Bool
+				d.Ptr.Valid = s.Ptr != nil
+				if s.Ptr != nil {
+					d.Ptr.String = *s.Ptr
+				}
 			}`,
 		},
 		{

@@ -77,8 +77,13 @@ func (g *fileGen) copyField(dst, src value) error {
 	}
 	if out.valid != "" {
 		valid := "true"
-		if in.valid != "" {
+		switch {
+		case in.valid != "":
 			valid = in.valid
+		case isString(in.val.typ):
+			// Only empty string is always an empty value,
+			// unlike zero number or false boolean.
+			valid = in.val.expr + ` != ""`
 		}
 		if out.invalid {
 			valid = negate(valid)
@@ -295,6 +300,11 @@ func (g *fileGen) conversion(t types.Type, x string) string {
 		s = "(" + s + ")"
 	}
 	return s + "(" + x + ")"
+}
+
+func isString(t types.Type) bool {
+	b, ok := t.Underlying().(*types.Basic)
+	return ok && b.Info()&types.IsString != 0
 }
 
 // kind returns category of basic type, which values are convertible
