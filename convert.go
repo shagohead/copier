@@ -146,6 +146,9 @@ func (g *fileGen) assign(out destination, val value) (string, bool, error) {
 	if v, ok, err := g.convertValue(out.val.typ, val); err != nil || ok {
 		return out.val.expr + " = " + v.expr, ok, err
 	}
+	if stmt, ok, err := g.assignSlice(out.val, val); err != nil || ok {
+		return stmt, ok, err
+	}
 	if out.elem == nil {
 		return "", false, nil
 	}
@@ -162,6 +165,33 @@ func (g *fileGen) assign(out destination, val value) (string, bool, error) {
 		return fmt.Sprintf("%s = new(%s)", out.val.expr, v.expr), true, nil
 	}
 	return fmt.Sprintf("{\nv := %s\n%s = &v\n}", v.expr, out.val.expr), true, nil
+}
+
+// assignSlice returns statement assigning src slice into dst slice
+// with converting each element, preserving nil slice.
+func (g *fileGen) assignSlice(dst, src value) (string, bool, error) {
+	ds, ok := dst.typ.Underlying().(*types.Slice)
+	if !ok {
+		return "", false, nil
+	}
+	ss, ok := src.typ.Underlying().(*types.Slice)
+	if !ok {
+		return "", false, nil
+	}
+	x := src.expr
+	if strings.HasPrefix(x, "*") {
+		x = "(" + x + ")"
+	}
+	elem, ok, err := g.convertValue(ds.Elem(), value{x + "[i]", ss.Elem()})
+	x = src.expr
+	if err != nil || !ok {
+		return "", false, err
+	}
+	return fmt.Sprintf("if %[1]s != nil {\n"+
+		"%[2]s = make(%[3]s, len(%[1]s))\n"+
+		"for i := range %[1]s {\n%[2]s[i] = %[4]s\n}\n"+
+		"} else {\n%[2]s = nil\n}",
+		x, dst.expr, g.typeString(dst.typ), elem.expr), true, nil
 }
 
 func (g *fileGen) source(src value) (source, error) {
@@ -336,6 +366,12 @@ func (g *fileGen) typeKeys(t types.Type) []string {
 	switch t := t.(type) {
 	case *types.Basic:
 		return []string{t.Name()}
+	case *types.Slice:
+		keys := g.typeKeys(t.Elem())
+		for i := range keys {
+			keys[i] = "[]" + keys[i]
+		}
+		return keys
 	case *types.Named:
 		obj := t.Obj()
 		if obj.Pkg() == nil {

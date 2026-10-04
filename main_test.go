@@ -613,22 +613,52 @@ func TestGenerate(t *testing.T) {
 			code: `
 			import "time"
 
+			type S struct {
+				Value string
+			}
+
+			func FromS(s S) string {
+				return s.Value
+			}
+
+			func FromSlice(s []time.Time) []string {
+				d := make([]string, len(s))
+				for i, s := range s {
+					d[i] = s.String()
+				}
+				return d
+			}
+
 			type Receiver struct {
-				Epoch int64
-				Repr string
+				Epoch     int64
+				Repr      string
+				FuncS     string
+				FuncSlice []string
 			}
 			type Argument struct {
-				Epoch time.Time
-				Repr time.Time
+				Epoch     time.Time
+				Repr      time.Time
+				FuncS     S
+				FuncSlice []time.Time
 			}
 			`,
-			gett: map[string]map[string]string{"time.Time": {
-				"int64":  ".Unix()",
-				"string": `.Format("2006-01-02T15:04:05 -07:00:00")`,
-			}},
+			gett: map[string]map[string]string{
+				"time.Time": {
+					"int64":  ".Unix()",
+					"string": `.Format("2006-01-02T15:04:05 -07:00:00")`,
+				},
+				"S": {
+					"string": "FromS({{.}})",
+				},
+				"[]time.Time": {
+					"[]string": "FromSlice({{.}})",
+				},
+			},
 			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
 				d.Epoch = s.Epoch.Unix()
 				d.Repr = s.Repr.Format("2006-01-02T15:04:05 -07:00:00")
+				d.FuncS = FromS(s.FuncS)
+				d.FuncSlice = FromSlice(s.FuncSlice)
 			}`,
 		},
 		{
@@ -651,6 +681,117 @@ func TestGenerate(t *testing.T) {
 					d.FromPtr = (*s.FromPtr).Unix()
 				}
 				d.IntoPtr = new(s.IntoPtr.Unix())
+			}`,
+		},
+		{
+			name: "getters/slice-elements",
+			code: `
+			import (
+				"net/url"
+				"time"
+			)
+
+			type Receiver struct {
+				Epochs  []int64
+				Reprs   Strings
+				URLs    []string
+				Opt     []string
+				Ptr     []int64
+				Numbers []int64
+			}
+			type Argument struct {
+				Epochs  []time.Time
+				Reprs   Times
+				URLs    []url.URL
+				Opt     OptURLs
+				Ptr     *[]time.Time
+				Numbers []int32
+			}
+			type Strings []string
+			type Times []time.Time
+			type OptURLs struct { Value []url.URL; Set bool }
+			`,
+			gett: map[string]map[string]string{
+				"time.Time": {
+					"int64":  ".Unix()",
+					"string": ".String()",
+				},
+				"url.URL": {"string": ".String()"},
+			},
+			wrap: map[string]wrapper{"OptURLs": {Value: ".Value", CopyIf: ".Set"}},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				if s.Epochs != nil {
+					d.Epochs = make([]int64, len(s.Epochs))
+					for i := range s.Epochs {
+						d.Epochs[i] = s.Epochs[i].Unix()
+					}
+				} else {
+					d.Epochs = nil
+				}
+				if s.Reprs != nil {
+					d.Reprs = make(Strings, len(s.Reprs))
+					for i := range s.Reprs {
+						d.Reprs[i] = s.Reprs[i].String()
+					}
+				} else {
+					d.Reprs = nil
+				}
+				if s.URLs != nil {
+					d.URLs = make([]string, len(s.URLs))
+					for i := range s.URLs {
+						d.URLs[i] = s.URLs[i].String()
+					}
+				} else {
+					d.URLs = nil
+				}
+				if s.Opt.Set {
+					if s.Opt.Value != nil {
+						d.Opt = make([]string, len(s.Opt.Value))
+						for i := range s.Opt.Value {
+							d.Opt[i] = s.Opt.Value[i].String()
+						}
+					} else {
+						d.Opt = nil
+					}
+				}
+				if s.Ptr != nil {
+					if *s.Ptr != nil {
+						d.Ptr = make([]int64, len(*s.Ptr))
+						for i := range *s.Ptr {
+							d.Ptr[i] = (*s.Ptr)[i].Unix()
+						}
+					} else {
+						d.Ptr = nil
+					}
+				} else {
+					d.Ptr = nil
+				}
+				if s.Numbers != nil {
+					d.Numbers = make([]int64, len(s.Numbers))
+					for i := range s.Numbers {
+						d.Numbers[i] = int64(s.Numbers[i])
+					}
+				} else {
+					d.Numbers = nil
+				}
+			}`,
+		},
+		{
+			name: "getters/slice-key-priority",
+			code: `
+			import "time"
+
+			type Receiver struct { A []string }
+			type Argument struct { A []time.Time }
+
+			func FromSlice(s []time.Time) []string { return nil }
+			`,
+			gett: map[string]map[string]string{
+				"time.Time":   {"string": ".String()"},
+				"[]time.Time": {"[]string": "FromSlice({{.}})"},
+			},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.A = FromSlice(s.A)
 			}`,
 		},
 		{
