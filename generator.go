@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"fmt"
 	"go/format"
+	"go/token"
 	"go/types"
 	"go/version"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"text/template"
+	"unicode"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -74,6 +78,8 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 				if p, _ := splitTypePath(m.Argument); p != "" {
 					addPattern(p)
 				}
+				// Packages of additional arguments are not loaded for performance,
+				// see fileGen.paramType.
 			}
 		}
 	}
@@ -137,8 +143,6 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 			return
 		}
 		index[p.Path()] = p
-		// FIXME: Возможно ходить по импортам лишнее.
-		// Все нужные для анализа пакеты уже должны быть в pkgs.
 		for _, imp := range p.Imports() {
 			walk(imp)
 		}
@@ -154,9 +158,21 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 			pkg:      t.pkg,
 			index:    index,
 			imports:  make(map[string]string),
+			explicit: make(map[string]bool),
 			methods:  make(map[string]bool),
 			wrappers: make(map[string]*wrapperInfo),
 			getters:  make(map[string][]getter),
+			reserved: map[string]bool{"d": true, "s": true},
+		}
+		// Imports should not be shadowed by arguments of any method.
+		for _, rcv := range t.methods {
+			for _, m := range rcv.Value {
+				for _, param := range m.allParams() {
+					if name, _, ok := splitParam(param); ok {
+						g.reserved[name] = true
+					}
+				}
+			}
 		}
 		for _, rcv := range t.methods {
 			for _, m := range rcv.Value {
@@ -186,6 +202,24 @@ func realpath(p string) string {
 	return p
 }
 
+// allParams returns additional arguments of method and field overrides.
+func (m method) allParams() []string {
+	params := slices.Clone(m.Params)
+	for _, f := range m.Fields {
+		params = append(params, f.Args...)
+	}
+	return params
+}
+
+// splitParam splits additional argument "name path/to/pkg.Type".
+func splitParam(s string) (name, typ string, ok bool) {
+	fields := strings.Fields(s)
+	if len(fields) != 2 {
+		return "", "", false
+	}
+	return fields[0], fields[1], true
+}
+
 // splitTypePath splits "path/to/pkg.Name" into package path and type name.
 func splitTypePath(s string) (pkgPath, name string) {
 	i := strings.LastIndex(s, ".")
@@ -201,9 +235,11 @@ type fileGen struct {
 	pkg      *packages.Package
 	index    map[string]*types.Package // Loaded packages by path.
 	imports  map[string]string         // Import names by path.
+	explicit map[string]bool           // Imports which need explicit name.
 	methods  map[string]bool           // Generated methods.
 	wrappers map[string]*wrapperInfo
 	getters  map[string][]getter
+	reserved map[string]bool // Names which cannot be used for imports.
 	body     bytes.Buffer
 }
 
@@ -224,9 +260,14 @@ func (g *fileGen) method(rname string, m method) error {
 		return fmt.Errorf("argument: %v", err)
 	}
 
-	mname := "CopyFrom"
+	mname := "Copy"
+	if m.Mode == OnlySet {
+		mname = "Set"
+	}
 	if m.Into {
-		mname = "CopyInto"
+		mname += "Into"
+	} else {
+		mname += "From"
 	}
 	if aname != rname {
 		mname += aname
@@ -271,12 +312,13 @@ func (g *fileGen) method(rname string, m method) error {
 	if err := checkNames("skip", m.Skip.Names, srcFields, true); err != nil {
 		return err
 	}
-
-	recvName, argName := dstName, srcName
-	if m.Into {
-		recvName, argName = srcName, dstName
+	if err := checkNames("fields", slices.Sorted(maps.Keys(m.Fields)), dstFields, true); err != nil {
+		return err
 	}
-	fmt.Fprintf(&g.body, "\nfunc (%s *%s) %s(%s *%s) {\n", recvName, rname, mname, argName, g.typeString(anamed))
+
+	// Pairs of destination and source fields, either of which may be nil.
+	type pair struct{ dst, src *types.Var }
+	var pairs []pair
 	used := make(map[string]bool, len(rfields))
 	for _, rf := range rfields {
 		an := rf.Name()
@@ -284,41 +326,16 @@ func (g *fileGen) method(rname string, m method) error {
 			an = r
 		}
 		af := afieldsByName[an]
-		dst, src := rf, af
-		if m.Into {
-			dst, src = src, dst
-		}
 		if af != nil {
 			if used[an] {
 				return fmt.Errorf("argument field %s matched more than once", an)
 			}
 			used[an] = true
 		}
-		if dst != nil && m.Except.has(dst.Name()) || src != nil && m.Skip.has(src.Name()) {
-			continue
-		}
-		if af == nil {
-			if m.Into {
-				if m.Skip.All {
-					continue
-				}
-				return fmt.Errorf("source field %s has no destination field, add it into skip or rename", rf.Name())
-			}
-			if m.Except.All {
-				continue
-			}
-			return fmt.Errorf("destination field %s has no source field, add it into except or rename", rf.Name())
-		}
-		copyField := g.copyField
-		if m.Mode == OnlySet {
-			copyField = g.copySet
-		}
-		err := copyField(
-			value{dstName + "." + dst.Name(), dst.Type()},
-			value{srcName + "." + src.Name(), src.Type()},
-		)
-		if err != nil {
-			return fmt.Errorf("field %s: %v", dst.Name(), err)
+		if m.Into {
+			pairs = append(pairs, pair{af, rf})
+		} else {
+			pairs = append(pairs, pair{rf, af})
 		}
 	}
 	for _, af := range afields {
@@ -326,15 +343,238 @@ func (g *fileGen) method(rname string, m method) error {
 			continue
 		}
 		if m.Into {
-			if !m.Except.hasUnmatched(af.Name()) {
-				return fmt.Errorf("destination field %s has no source field, add it into except or rename", af.Name())
+			pairs = append(pairs, pair{af, nil})
+		} else {
+			pairs = append(pairs, pair{nil, af})
+		}
+	}
+
+	// Arguments of overrides are merged in fields order.
+	params := m.Params
+	for _, p := range pairs {
+		if p.dst != nil {
+			params = append(params, m.Fields[p.dst.Name()].Args...)
+		}
+	}
+	paramsDecl, err := g.params(params)
+	if err != nil {
+		return err
+	}
+	recvName, argName := dstName, srcName
+	if m.Into {
+		recvName, argName = srcName, dstName
+	}
+	fmt.Fprintf(&g.body, "\nfunc (%s *%s) %s(%s *%s%s) {\n", recvName, rname, mname, argName, g.typeString(anamed), paramsDecl)
+
+	for _, p := range pairs {
+		dst, src := p.dst, p.src
+		if dst == nil {
+			if !m.Skip.hasUnmatched(src.Name()) {
+				return fmt.Errorf("source field %s has no destination field, add it into skip or rename", src.Name())
 			}
-		} else if !m.Skip.hasUnmatched(af.Name()) {
-			return fmt.Errorf("source field %s has no destination field, add it into skip or rename", af.Name())
+			continue
+		}
+		override, overridden := m.Fields[dst.Name()]
+		if m.Except.has(dst.Name()) {
+			if overridden {
+				return fmt.Errorf("field %s is both in except and fields", dst.Name())
+			}
+			continue
+		}
+		if src != nil && m.Skip.has(src.Name()) {
+			src = nil
+			if !overridden {
+				continue
+			}
+		}
+		dstExpr := dstName + "." + dst.Name()
+		var srcExpr string
+		if src != nil {
+			srcExpr = srcName + "." + src.Name()
+		}
+		if overridden {
+			if err := g.override(dstExpr, srcExpr, override); err != nil {
+				return fmt.Errorf("field %s: %v", dst.Name(), err)
+			}
+			continue
+		}
+		if src == nil {
+			if !m.Except.hasUnmatched(dst.Name()) {
+				return fmt.Errorf("destination field %s has no source field, add it into except or rename", dst.Name())
+			}
+			continue
+		}
+		copyField := g.copyField
+		if m.Mode == OnlySet {
+			copyField = g.copySet
+		}
+		err := copyField(value{dstExpr, dst.Type()}, value{srcExpr, src.Type()})
+		if err != nil {
+			return fmt.Errorf("field %s: %v", dst.Name(), err)
 		}
 	}
 	g.body.WriteString("}\n")
 	return nil
+}
+
+// Data of field override template.
+type overrideData struct {
+	dst, src string
+	usedDst  bool
+	noSrc    bool
+}
+
+// D returns destination field expression.
+func (d *overrideData) D() string {
+	d.usedDst = true
+	return d.dst
+}
+
+// S returns source field expression.
+func (d *overrideData) S() string {
+	return d.String()
+}
+
+// String returns source field expression for {{.}}.
+func (d *overrideData) String() string {
+	if d.src == "" {
+		d.noSrc = true
+	}
+	return d.src
+}
+
+// override writes field copying statement from override template.
+func (g *fileGen) override(dst, src string, f field) error {
+	if f.Expr == "" {
+		return fmt.Errorf("fields: expr is required")
+	}
+	t, err := template.New("").Parse(f.Expr)
+	if err != nil {
+		return fmt.Errorf("fields: %v", err)
+	}
+	data := &overrideData{dst: dst, src: src}
+	var b strings.Builder
+	if err := t.Execute(&b, data); err != nil {
+		return fmt.Errorf("fields: %v", err)
+	}
+	if data.noSrc {
+		return fmt.Errorf("fields: expr uses source field, but there is no source field")
+	}
+	if data.usedDst {
+		fmt.Fprintln(&g.body, b.String())
+	} else {
+		fmt.Fprintf(&g.body, "%s = %s\n", dst, b.String())
+	}
+	return nil
+}
+
+// params returns additional arguments declaration, prefixed with comma.
+func (g *fileGen) params(list []string) (string, error) {
+	var b strings.Builder
+	// Same arguments of method and field overrides are merged.
+	names := map[string]string{"d": "", "s": ""}
+	for _, param := range list {
+		name, typ, ok := splitParam(param)
+		if !ok {
+			return "", fmt.Errorf("arg %q: expected format \"name path/to/package.Type\"", param)
+		}
+		if !token.IsIdentifier(name) {
+			return "", fmt.Errorf("arg %q: invalid name %s", param, name)
+		}
+		if prev, ok := names[name]; ok {
+			if prev != "" && prev == typ {
+				continue
+			}
+			return "", fmt.Errorf("arg %q: name %s is already used", param, name)
+		}
+		names[name] = typ
+		t, err := g.paramType(typ)
+		if err != nil {
+			return "", fmt.Errorf("arg %q: %v", param, err)
+		}
+		fmt.Fprintf(&b, ", %s %s", name, t)
+	}
+	return b.String(), nil
+}
+
+// paramType returns type name of additional argument type string,
+// like "*[]path/to/pkg.Name", registering import of its package.
+//
+// Packages of argument types are not loaded.
+// Loaded package (generated, argument types and their imports) is used by its name.
+// Otherwise package name is guessed from its path and imported with explicit name,
+// since actual package name may differ from the path.
+func (g *fileGen) paramType(s string) (string, error) {
+	for _, prefix := range []string{"*", "[]"} {
+		if rest, ok := strings.CutPrefix(s, prefix); ok {
+			t, err := g.paramType(rest)
+			return prefix + t, err
+		}
+	}
+	pkgPath, name := splitTypePath(s)
+	if !token.IsIdentifier(name) {
+		return "", fmt.Errorf("invalid type %s", s)
+	}
+	switch pkgPath {
+	case "":
+		if _, ok := types.Universe.Lookup(name).(*types.TypeName); ok {
+			return name, nil
+		}
+		if _, ok := g.pkg.Types.Scope().Lookup(name).(*types.TypeName); ok {
+			return name, nil
+		}
+		return "", fmt.Errorf("type %s not found", s)
+	case g.pkg.PkgPath:
+		if _, ok := g.pkg.Types.Scope().Lookup(name).(*types.TypeName); !ok {
+			return "", fmt.Errorf("type %s not found", s)
+		}
+		return name, nil
+	}
+	if p := g.index[pkgPath]; p != nil {
+		if _, ok := p.Scope().Lookup(name).(*types.TypeName); !ok {
+			return "", fmt.Errorf("type %s not found", s)
+		}
+		return g.qualifier(p) + "." + name, nil
+	}
+	n := g.importName(pkgPath, guessPkgName(pkgPath))
+	if !isStd(pkgPath) {
+		g.explicit[pkgPath] = true
+	}
+	return n + "." + name, nil
+}
+
+// guessPkgName returns package name guessed from its import path,
+// like "yaml" for "gopkg.in/yaml.v3" or "foo" for "github.com/x/go-foo/v2".
+func guessPkgName(pkgPath string) string {
+	elems := strings.Split(pkgPath, "/")
+	name := elems[len(elems)-1]
+	if len(elems) > 1 && isMajorVersion(name) {
+		name = elems[len(elems)-2]
+	}
+	name, _, _ = strings.Cut(name, ".")
+	name = strings.TrimPrefix(name, "go-")
+	name = strings.Map(func(r rune) rune {
+		if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, name)
+	if !token.IsIdentifier(name) {
+		return "pkg"
+	}
+	return name
+}
+
+func isMajorVersion(s string) bool {
+	v, ok := strings.CutPrefix(s, "v")
+	return ok && v != "" && strings.Trim(v, "0123456789") == ""
+}
+
+// isStd reports if package path belongs to standard library,
+// which package names are equal to the last path element.
+func isStd(pkgPath string) bool {
+	first, _, _ := strings.Cut(pkgPath, "/")
+	return !strings.Contains(first, ".")
 }
 
 // checkNames checks that all names (or map keys/values) are fields.
@@ -398,13 +638,14 @@ func (g *fileGen) qualifier(p *types.Package) string {
 	return g.importName(p.Path(), p.Name())
 }
 
-// importName returns package name with optional suffix number, if name already in use.
+// importName returns package name with optional suffix number,
+// if name already planned for using in generating file imports.
 func (g *fileGen) importName(pkgPath, name string) string {
 	if n, ok := g.imports[pkgPath]; ok {
 		return n
 	}
 	taken := func(n string) bool {
-		if n == "d" || n == "s" || g.pkg.Types.Scope().Lookup(n) != nil {
+		if g.reserved[n] || g.pkg.Types.Scope().Lookup(n) != nil {
 			return true
 		}
 		for _, v := range g.imports {
@@ -441,7 +682,7 @@ func (g *fileGen) content() ([]byte, error) {
 	}
 	slices.Sort(paths)
 	spec := func(p string) string {
-		if n := g.imports[p]; n != path.Base(p) {
+		if n := g.imports[p]; n != path.Base(p) || g.explicit[p] {
 			return n + " " + fmt.Sprintf("%q", p)
 		}
 		return fmt.Sprintf("%q", p)

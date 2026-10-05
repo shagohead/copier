@@ -24,12 +24,71 @@ type pkgMethods struct {
 
 // Copying method description.
 type method struct {
-	Argument string            `yaml:"arg"`    // Method argument type path.
+	Argument string            `yaml:"-"`      // Method argument type path.
+	Params   []string          `yaml:"-"`      // Additional method arguments: "name path/to/pkg.Type".
 	Mode     mode              `yaml:"mode"`   // Generation mode, FullCopy by default.
 	Into     bool              `yaml:"into"`   // Copy from receiver into argument.
 	Rename   map[string]string `yaml:"rename"` // Map receiver to argument field names.
 	Except   fieldSet          `yaml:"except"` // Copy into all destination fields, except these.
 	Skip     fieldSet          `yaml:"skip"`   // Copy from all source fields, skipping these.
+	Fields   map[string]field  `yaml:"fields"` // Overrides of copying by destination field names.
+}
+
+// UnmarshalYAML decodes method, which "arg" is either argument type path,
+// or list of argument type path and additional arguments.
+func (m *method) UnmarshalYAML(node ast.Node) error {
+	type Plain method
+	var v struct {
+		Plain `yaml:",inline"`
+		Arg   any `yaml:"arg"`
+	}
+	if err := yaml.NodeToValue(node, &v); err != nil {
+		return err
+	}
+	*m = method(v.Plain)
+	switch arg := v.Arg.(type) {
+	case nil:
+	case string:
+		m.Argument = arg
+	case []any:
+		if len(arg) == 0 {
+			return fmt.Errorf("arg: at least one item required")
+		}
+		for i, item := range arg {
+			s, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("arg: item %d is not a string", i)
+			}
+			if i == 0 {
+				m.Argument = s
+			} else {
+				m.Params = append(m.Params, s)
+			}
+		}
+	default:
+		return fmt.Errorf("arg: expected string or list of strings")
+	}
+	return nil
+}
+
+// Override of field copying.
+//
+// Expression is a template of the whole assignment statement,
+// if it uses destination field {{.D}}, like "someFunc(&{{.D}}, &{{.S}})".
+// Otherwise it is a template of value assigned into destination field,
+// where {{.}} or {{.S}} is the source field, like "someFunc({{.}})".
+type field struct {
+	Expr string   `yaml:"expr"` // Expression template.
+	Args []string `yaml:"args"` // Additional method arguments, merged with arg.
+}
+
+// UnmarshalYAML decodes field from mapping or from expression string.
+func (f *field) UnmarshalYAML(node ast.Node) error {
+	if _, ok := node.(*ast.StringNode); ok {
+		return yaml.NodeToValue(node, &f.Expr)
+	}
+	type Plain field
+	return yaml.NodeToValue(node, (*Plain)(f))
 }
 
 // Method generation mode.

@@ -336,7 +336,7 @@ func TestGenerate(t *testing.T) {
 				"OptInt32": {Value: ".Value", CopyIf: ".Set"},
 				"OptNil":   {Value: ".Value", CopyIf: "!{{.}}.Null"},
 			},
-			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+			want: `func (d *Receiver) SetFromArgument(s *Argument) {
 				d.A = s.A.Set
 				d.B = Flag(s.B.Set)
 				d.C = s.C != nil
@@ -352,7 +352,7 @@ func TestGenerate(t *testing.T) {
 			type Receiver struct { A []int }
 			type Argument struct { A, B bool }
 			`,
-			want: `func (s *Receiver) CopyIntoArgument(d *Argument) {
+			want: `func (s *Receiver) SetIntoArgument(d *Argument) {
 				d.A = s.A != nil
 			}`,
 		},
@@ -393,6 +393,242 @@ func TestGenerate(t *testing.T) {
 			type Argument struct{}
 			`,
 			fail: `unknown mode "Partial"`,
+		},
+		{
+			name: "params",
+			meth: method{Params: []string{
+				"ctx context.Context",
+				"loc *time.Location",
+				"n int",
+				"ids []example.ID",
+				"local ID",
+			}},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A int }
+			type ID int
+			`,
+			want: `import (
+				"context"
+				"time"
+			)
+
+			func (d *Receiver) CopyFromArgument(s *Argument, ctx context.Context, loc *time.Location, n int, ids []ID, local ID) {
+				d.A = s.A
+			}`,
+		},
+		{
+			name: "params/not loaded packages",
+			meth: method{
+				Params: []string{
+					"c *example.com/nonexistent/go-client/v3.Client",
+					"n []gopkg.in/yaml.v3.Node",
+					"r *math/rand/v2.Rand",
+					"t time.Time",
+				},
+				Fields: map[string]field{"A": {Expr: "c.Get(n, r)", Args: []string{"n []gopkg.in/yaml.v3.Node"}}},
+				Skip:   fieldSet{Names: []string{"T"}},
+			},
+			code: `
+			import "time"
+
+			type Receiver struct { A int }
+			type Argument struct { T time.Time }
+			`,
+			want: `import (
+				client "example.com/nonexistent/go-client/v3"
+				yaml "gopkg.in/yaml.v3"
+				rand "math/rand/v2"
+				"time"
+			)
+
+			func (d *Receiver) CopyFromArgument(s *Argument, c *client.Client, n []yaml.Node, r *rand.Rand, t time.Time) {
+				d.A = c.Get(n, r)
+			}`,
+		},
+		{
+			name: "params/local module import",
+			meth: method{
+				Params: []string{"c *project/client.Client"},
+				Fields: map[string]field{"A": {Expr: "c.Get({{.}}, n)", Args: []string{"n []project/client.Node"}}},
+			},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A int }
+			`,
+			want: `import "project/client"
+
+			func (d *Receiver) CopyFromArgument(s *Argument, c *client.Client, n []client.Node) {
+				d.A = c.Get(s.A, n)
+			}`,
+		},
+		{
+			name: "params/import name shadowed",
+			meth: method{Params: []string{"time string"}},
+			code: `
+			import "time"
+
+			type Receiver struct { A time.Duration }
+			type Argument struct { A int64 }
+			`,
+			want: `import time2 "time"
+
+			func (d *Receiver) CopyFromArgument(s *Argument, time string) {
+				d.A = time2.Duration(s.A)
+			}`,
+		},
+		{
+			name: "params/format",
+			meth: method{Params: []string{"ctx"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: `arg "ctx": expected format "name path/to/package.Type"`,
+		},
+		{
+			name: "params/reserved",
+			meth: method{Params: []string{"s string"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: `arg "s string": name s is already used`,
+		},
+		{
+			name: "params/duplicate",
+			meth: method{Params: []string{"a string", "a int"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: `arg "a int": name a is already used`,
+		},
+		{
+			name: "params/unknown type",
+			meth: method{Params: []string{"a Unknown"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: `arg "a Unknown": type Unknown not found`,
+		},
+		{
+			name: "fields",
+			meth: method{
+				Params: []string{"loc *time.Location"},
+				Fields: map[string]field{
+					"Value":   {Expr: "upper({{.}})"},
+					"Source":  {Expr: "{{.S}}.In(loc)", Args: []string{"loc *time.Location"}},
+					"Whole":   {Expr: "parse(&{{.D}}, &{{.S}}, strict)", Args: []string{"strict bool"}},
+					"Renamed": {Expr: "{{.}} + 1"},
+					"Created": {Expr: "now", Args: []string{"now time.Time"}},
+				},
+				Rename: map[string]string{"Renamed": "Other"},
+			},
+			code: `
+			import "time"
+
+			type Receiver struct {
+				Plain   int
+				Value   string
+				Source  time.Time
+				Whole   int
+				Renamed int
+				Created time.Time
+			}
+			type Argument struct {
+				Plain  int
+				Value  string
+				Source time.Time
+				Whole  string
+				Other  int
+			}
+
+			func upper(s string) string { return s }
+			func parse(d *int, s *string, strict bool) {}
+			`,
+			want: `import "time"
+
+			func (d *Receiver) CopyFromArgument(s *Argument, loc *time.Location, strict bool, now time.Time) {
+				d.Plain = s.Plain
+				d.Value = upper(s.Value)
+				d.Source = s.Source.In(loc)
+				parse(&d.Whole, &s.Whole, strict)
+				d.Renamed = s.Other + 1
+				d.Created = now
+			}`,
+		},
+		{
+			name: "fields/into",
+			meth: method{Into: true, Fields: map[string]field{
+				"A": {Expr: "{{.}} * 2"},
+				"B": {Expr: "id", Args: []string{"id int"}},
+			}},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A, B int }
+			`,
+			want: `func (s *Receiver) CopyIntoArgument(d *Argument, id int) {
+				d.A = s.A * 2
+				d.B = id
+			}`,
+		},
+		{
+			name: "fields/skipped source",
+			meth: method{
+				Skip:   fieldSet{Names: []string{"A"}},
+				Fields: map[string]field{"A": {Expr: "0"}},
+			},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A int }
+			`,
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.A = 0
+			}`,
+		},
+		{
+			name: "fields/no source",
+			meth: method{Fields: map[string]field{"A": {Expr: "{{.}}"}}},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct{}
+			`,
+			fail: "field A: fields: expr uses source field, but there is no source field",
+		},
+		{
+			name: "fields/except",
+			meth: method{
+				Except: fieldSet{Names: []string{"A"}},
+				Fields: map[string]field{"A": {Expr: "1"}},
+			},
+			code: `
+			type Receiver struct { A int }
+			type Argument struct { A int }
+			`,
+			fail: "field A is both in except and fields",
+		},
+		{
+			name: "fields/unknown",
+			meth: method{Fields: map[string]field{"X": {Expr: "1"}}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			fail: "fields: unknown field X",
+		},
+		{
+			name: "fields/args conflict",
+			meth: method{
+				Params: []string{"n int"},
+				Fields: map[string]field{"A": {Expr: "n", Args: []string{"n string"}}},
+			},
+			code: `
+			type Receiver struct { A string }
+			type Argument struct{}
+			`,
+			fail: `arg "n string": name n is already used`,
 		},
 		{
 			name: "wrapper/dst",
@@ -871,6 +1107,11 @@ methods:
     - arg: C
       except:
       mode: OnlySet
+    - arg: [D]
+    - arg:
+        - E
+        - ctx context.Context
+        - n int
 `), &cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -879,8 +1120,46 @@ methods:
 		{Argument: "A", Except: fieldSet{All: true}},
 		{Argument: "B", Skip: fieldSet{Names: []string{"X", "Y"}}},
 		{Argument: "C", Mode: OnlySet},
+		{Argument: "D"},
+		{Argument: "E", Params: []string{"ctx context.Context", "n int"}},
 	}
 	if diff := cmp.Diff(want, cfg.Methods[0].Value, cmp.AllowUnexported(method{}, fieldSet{})); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestArgYAMLErrors(t *testing.T) {
+	for _, tt := range []struct{ yaml, fail string }{
+		{"arg: []", "arg: at least one item required"},
+		{"arg: [A, 1]", "arg: item 1 is not a string"},
+		{"arg: {A: B}", "arg: expected string or list of strings"},
+	} {
+		var m method
+		err := yaml.Unmarshal([]byte(tt.yaml), &m)
+		if err == nil || !strings.Contains(err.Error(), tt.fail) {
+			t.Errorf("%s: want error %q, got %v", tt.yaml, tt.fail, err)
+		}
+	}
+}
+
+func TestFieldsYAML(t *testing.T) {
+	var m method
+	err := yaml.Unmarshal([]byte(`
+arg: A
+fields:
+  X: "fn({{.}})"
+  Y:
+    expr: "set(&{{.D}}, {{.S}}, n)"
+    args: [n int]
+`), &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := method{Argument: "A", Fields: map[string]field{
+		"X": {Expr: "fn({{.}})"},
+		"Y": {Expr: "set(&{{.D}}, {{.S}}, n)", Args: []string{"n int"}},
+	}}
+	if diff := cmp.Diff(want, m, cmp.AllowUnexported(method{}, fieldSet{})); diff != "" {
 		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }
