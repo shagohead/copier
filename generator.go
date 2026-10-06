@@ -136,6 +136,17 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 		}
 	}
 
+	importNames := make(map[string]string, len(cfg.Imports))
+	for name, pkgPath := range cfg.Imports {
+		if !token.IsIdentifier(name) {
+			return nil, fmt.Errorf("imports: invalid name %q", name)
+		}
+		if prev, ok := importNames[pkgPath]; ok {
+			return nil, fmt.Errorf("imports: %s has names %s and %s", pkgPath, min(prev, name), max(prev, name))
+		}
+		importNames[pkgPath] = name
+	}
+
 	index := make(map[string]*types.Package)
 	var walk func(p *types.Package)
 	walk = func(p *types.Package) {
@@ -159,6 +170,7 @@ func generate(cfg *config, dir string) ([]outFile, error) {
 			index:    index,
 			imports:  make(map[string]string),
 			explicit: make(map[string]bool),
+			names:    importNames,
 			methods:  make(map[string]bool),
 			wrappers: make(map[string]*wrapperInfo),
 			getters:  make(map[string][]getter),
@@ -236,6 +248,7 @@ type fileGen struct {
 	index    map[string]*types.Package // Loaded packages by path.
 	imports  map[string]string         // Import names by path.
 	explicit map[string]bool           // Imports which need explicit name.
+	names    map[string]string         // Configured import names by path.
 	methods  map[string]bool           // Generated methods.
 	wrappers map[string]*wrapperInfo
 	getters  map[string][]getter
@@ -537,7 +550,7 @@ func (g *fileGen) paramType(s string) (string, error) {
 		return g.qualifier(p) + "." + name, nil
 	}
 	n := g.importName(pkgPath, guessPkgName(pkgPath))
-	if !isStd(pkgPath) {
+	if !g.isStd(pkgPath) {
 		g.explicit[pkgPath] = true
 	}
 	return n + "." + name, nil
@@ -572,7 +585,11 @@ func isMajorVersion(s string) bool {
 
 // isStd reports if package path belongs to standard library,
 // which package names are equal to the last path element.
-func isStd(pkgPath string) bool {
+// Path of current module may also be without dot.
+func (g *fileGen) isStd(pkgPath string) bool {
+	if m := g.pkg.Module; m != nil && (pkgPath == m.Path || strings.HasPrefix(pkgPath, m.Path+"/")) {
+		return false
+	}
 	first, _, _ := strings.Cut(pkgPath, "/")
 	return !strings.Contains(first, ".")
 }
@@ -643,6 +660,10 @@ func (g *fileGen) qualifier(p *types.Package) string {
 func (g *fileGen) importName(pkgPath, name string) string {
 	if n, ok := g.imports[pkgPath]; ok {
 		return n
+	}
+	if n, ok := g.names[pkgPath]; ok {
+		name = n
+		g.explicit[pkgPath] = true
 	}
 	taken := func(n string) bool {
 		if g.reserved[n] || g.pkg.Types.Scope().Lookup(n) != nil {

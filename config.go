@@ -15,6 +15,7 @@ type config struct {
 	Methods  ordered[[]method]            `yaml:"methods"`  // Methods of the current package.
 	Getters  map[string]map[string]string `yaml:"getters"`  // Getters of alternative value types.
 	Wrappers map[string]wrapper           `yaml:"wrappers"` // Wrappers by full type path.
+	Imports  map[string]string            `yaml:"imports"`  // Package paths by explicit import names.
 }
 
 // Methods of single package.

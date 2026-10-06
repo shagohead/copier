@@ -63,6 +63,7 @@ func TestGenerate(t *testing.T) {
 		code string
 		gett map[string]map[string]string
 		wrap map[string]wrapper
+		imps map[string]string
 		fail string
 		want string
 	}{
@@ -447,20 +448,79 @@ func TestGenerate(t *testing.T) {
 			}`,
 		},
 		{
-			name: "params/local module import",
+			name: "params/current module import",
+			meth: method{Params: []string{"c *example/firestore/apiv1.Client"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			want: `import apiv1 "example/firestore/apiv1"
+
+			func (d *Receiver) CopyFromArgument(s *Argument, c *apiv1.Client) {
+			}`,
+		},
+		{
+			name: "params/current module import renamed",
 			meth: method{
-				Params: []string{"c *project/client.Client"},
-				Fields: map[string]field{"A": {Expr: "c.Get({{.}}, n)", Args: []string{"n []project/client.Node"}}},
+				Params: []string{"c *project/client/apiv2.Client"},
+				Fields: map[string]field{"A": {Expr: "c.Get({{.}}, n)", Args: []string{"n []project/client/apiv2.Node"}}},
 			},
 			code: `
 			type Receiver struct { A int }
 			type Argument struct { A int }
 			`,
-			want: `import "project/client"
+			imps: map[string]string{"client": "project/client/apiv2"},
+			want: `import client "project/client/apiv2"
 
 			func (d *Receiver) CopyFromArgument(s *Argument, c *client.Client, n []client.Node) {
 				d.A = c.Get(s.A, n)
 			}`,
+		},
+		{
+			name: "imports/loaded package",
+			code: `
+			import "time"
+
+			type Receiver struct { A time.Duration }
+			type Argument struct { A int64 }
+			`,
+			imps: map[string]string{"tm": "time"},
+			want: `import tm "time"
+
+			func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.A = tm.Duration(s.A)
+			}`,
+		},
+		{
+			name: "imports/explicit same name",
+			meth: method{Params: []string{"c *example.com/x/apiv1.Client"}},
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			imps: map[string]string{"firestore": "example.com/x/apiv1"},
+			want: `import firestore "example.com/x/apiv1"
+
+			func (d *Receiver) CopyFromArgument(s *Argument, c *firestore.Client) {
+			}`,
+		},
+		{
+			name: "imports/invalid name",
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			imps: map[string]string{"go-client": "example.com/x"},
+			fail: `imports: invalid name "go-client"`,
+		},
+		{
+			name: "imports/duplicate path",
+			code: `
+			type Receiver struct{}
+			type Argument struct{}
+			`,
+			imps: map[string]string{"a": "example.com/x", "b": "example.com/x"},
+			fail: "imports: example.com/x has names a and b",
 		},
 		{
 			name: "params/import name shadowed",
@@ -1073,6 +1133,7 @@ func TestGenerate(t *testing.T) {
 				Methods:  ordered[[]method]{{Key: "Receiver", Value: []method{tt.meth}}},
 				Getters:  tt.gett,
 				Wrappers: tt.wrap,
+				Imports:  tt.imps,
 			}
 			files, err := generate(cfg, dir)
 			if tt.fail != "" {
