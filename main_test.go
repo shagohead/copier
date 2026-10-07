@@ -167,6 +167,62 @@ func TestGenerate(t *testing.T) {
 			}`,
 		},
 		{
+			name: "type casting",
+			code: `
+			type RString string
+			type AString string
+			
+			type Receiver struct {
+		 		P *RString
+				S *RString
+			}
+			type Argument struct {
+		 		P *AString
+				S AString
+			}
+			`,
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				if s.P != nil {
+					d.P = (*RString)(s.P)
+				} else {
+					d.P = nil
+				}
+				d.S = (*RString)(&s.S)
+			}`,
+		},
+		{
+			name: "type casting/wrapper",
+			code: `
+			type RString string
+			type AString string
+
+			type Receiver struct {
+				A *RString
+				B *RString
+			}
+			type Argument struct {
+				A OptA
+				B OptB
+			}
+			type OptA struct { Value AString; Set bool }
+			type OptB struct { v AString; Set bool }
+
+			func (o OptB) Get() AString { return o.v }
+			`,
+			wrap: map[string]wrapper{
+				"OptA": {Value: ".Value", CopyIf: ".Set"},
+				"OptB": {Value: "{{.}}.Get()", Type: "AString", CopyIf: ".Set"},
+			},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				if s.A.Set {
+					d.A = (*RString)(&s.A.Value)
+				}
+				if s.B.Set {
+					d.B = new(RString(s.B.Get()))
+				}
+			}`,
+		},
+		{
 			name: "rename except skip",
 			meth: method{Rename: map[string]string{"A": "B"}, Except: fieldSet{Names: []string{"C"}}, Skip: fieldSet{Names: []string{"D"}}},
 			code: `

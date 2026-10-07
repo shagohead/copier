@@ -141,30 +141,56 @@ func (g *fileGen) copySet(dst, src value) error {
 	return nil
 }
 
-// assign returns statement assigning val into destination.
-func (g *fileGen) assign(out destination, val value) (string, bool, error) {
-	if v, ok, err := g.convertValue(out.val.typ, val); err != nil || ok {
-		return out.val.expr + " = " + v.expr, ok, err
+// assign returns statement assigning srcVal into destination.
+func (g *fileGen) assign(dst destination, srcVal value) (string, bool, error) {
+	if v, ok, err := g.convertValue(dst.val.typ, srcVal); err != nil || ok {
+		return dst.val.expr + " = " + v.expr, ok, err
 	}
-	if stmt, ok, err := g.assignSlice(out.val, val); err != nil || ok {
+	if stmt, ok, err := g.assignSlice(dst.val, srcVal); err != nil || ok {
 		return stmt, ok, err
 	}
-	if out.elem == nil {
+	if dst.elem == nil {
 		return "", false, nil
 	}
-	v, ok, err := g.convertValue(out.elem, val)
+	if ptr, ok := g.castPointer(dst.elem, srcVal); ok {
+		return dst.val.expr + " = " + ptr, true, nil
+	}
+	v, ok, err := g.convertValue(dst.elem, srcVal)
 	if err != nil || !ok {
 		return "", false, err
 	}
 	// Type of new(expr) is inferred from expr, which may be only assignable
 	// to the element type (like unnamed map into named map type).
-	if !types.Identical(out.elem, v.typ) {
-		v.expr = g.conversion(out.elem, v.expr)
+	if !types.Identical(dst.elem, v.typ) {
+		v.expr = g.conversion(dst.elem, v.expr)
 	}
 	if g.newExpr() {
-		return fmt.Sprintf("%s = new(%s)", out.val.expr, v.expr), true, nil
+		return fmt.Sprintf("%s = new(%s)", dst.val.expr, v.expr), true, nil
 	}
-	return fmt.Sprintf("{\nv := %s\n%s = &v\n}", v.expr, out.val.expr), true, nil
+	return fmt.Sprintf("{\nv := %s\n%s = &v\n}", v.expr, dst.val.expr), true, nil
+}
+
+// castPointer returns pointer to val converted into pointer to elem type,
+// if types are different, but have identical underlying types,
+// and val is addressable.
+func (g *fileGen) castPointer(dstElem types.Type, srcVal value) (string, bool) {
+	if types.Identical(dstElem, srcVal.typ) || !types.Identical(dstElem.Underlying(), srcVal.typ.Underlying()) {
+		return "", false
+	}
+	e, err := parser.ParseExpr(srcVal.expr)
+	if err != nil {
+		return "", false
+	}
+	var ptr string
+	switch x := unparen(e).(type) {
+	case *ast.StarExpr:
+		ptr = exprSubString(srcVal.expr, x.X)
+	case *ast.Ident, *ast.SelectorExpr:
+		ptr = "&" + srcVal.expr
+	default:
+		return "", false
+	}
+	return g.conversion(types.NewPointer(dstElem), ptr), true
 }
 
 // assignSlice returns statement assigning src slice into dst slice
@@ -578,7 +604,7 @@ func assignable(tmpl, x string) (lhs string, neg bool, err error) {
 	}
 	switch e.(type) {
 	case *ast.Ident, *ast.SelectorExpr, *ast.IndexExpr, *ast.StarExpr:
-		return exprString(s, e), neg, nil
+		return exprSubString(s, e), neg, nil
 	}
 	return "", false, fmt.Errorf("expression %q is not assignable", s)
 }
@@ -600,12 +626,12 @@ func negate(s string) string {
 		return "!" + s
 	case *ast.UnaryExpr:
 		if e.Op == token.NOT {
-			return exprString(s, unparen(e.X))
+			return exprSubString(s, unparen(e.X))
 		}
 	case *ast.BinaryExpr:
 		op := map[token.Token]string{token.EQL: "!=", token.NEQ: "=="}[e.Op]
 		if op != "" {
-			return exprString(s, e.X) + " " + op + " " + exprString(s, e.Y)
+			return exprSubString(s, e.X) + " " + op + " " + exprSubString(s, e.Y)
 		}
 	case *ast.SelectorExpr, *ast.CallExpr, *ast.IndexExpr, *ast.ParenExpr:
 		return "!" + s
@@ -623,7 +649,7 @@ func unparen(e ast.Expr) ast.Expr {
 	}
 }
 
-// exprString returns source of e parsed by parser.ParseExpr from src.
-func exprString(src string, e ast.Expr) string {
+// exprSubString returns source of e parsed by parser.ParseExpr from src.
+func exprSubString(src string, e ast.Expr) string {
 	return src[e.Pos()-1 : e.End()-1]
 }
