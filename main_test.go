@@ -1036,6 +1036,29 @@ func TestGenerate(t *testing.T) {
 			}`,
 		},
 		{
+			name: "getters/untyped",
+			code: `
+			type Flag bool
+
+			type Receiver struct {
+				Flag    Flag
+				FlagPtr *Flag
+				BoolPtr *bool
+			}
+			type Argument struct {
+				Flag    int64
+				FlagPtr int64
+				BoolPtr int64
+			}
+			`,
+			gett: map[string]map[string]string{"int64": {"Flag": "{{.}} > 0"}},
+			want: `func (d *Receiver) CopyFromArgument(s *Argument) {
+				d.Flag = s.Flag > 0
+				d.FlagPtr = new(Flag(s.FlagPtr > 0))
+				d.BoolPtr = new(bool(s.BoolPtr > 0))
+			}`,
+		},
+		{
 			name: "getters/slice-elements",
 			code: `
 			import (

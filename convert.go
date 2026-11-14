@@ -306,9 +306,16 @@ func (g *fileGen) convertValue(dst types.Type, src value) (value, bool, error) {
 			if err != nil {
 				return value{}, false, fmt.Errorf("getter %s: %v", gt.expr, err)
 			}
-			if v, ok := g.convert(dst, value{expr, gt.typ}); ok {
-				return v, true, nil
+			v, ok := g.convert(dst, value{expr, gt.typ})
+			if !ok {
+				continue
 			}
+			// Expression may be untyped (like comparison or constant),
+			// so its type is known only if it is converted, or not basic.
+			if b, ok := gt.typ.Underlying().(*types.Basic); ok && v.expr == expr {
+				v.typ = b
+			}
+			return v, true, nil
 		}
 	}
 	return value{}, false, nil
