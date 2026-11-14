@@ -29,6 +29,7 @@ type method struct {
 	Params   []string          `yaml:"-"`      // Additional method arguments: "name path/to/pkg.Type".
 	Mode     mode              `yaml:"mode"`   // Generation mode, FullCopy by default.
 	Into     bool              `yaml:"into"`   // Copy from receiver into argument.
+	Prefix   string            `yaml:"prefix"` // Method name part before argument type name.
 	Rename   map[string]string `yaml:"rename"` // Map receiver to argument field names.
 	Except   fieldSet          `yaml:"except"` // Copy into all destination fields, except these.
 	Skip     fieldSet          `yaml:"skip"`   // Copy from all source fields, skipping these.

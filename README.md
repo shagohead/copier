@@ -124,6 +124,7 @@ type of the same package (`User`) or fully qualified (`example.com/app/models.Us
 |----------|-------------|
 | `arg`    | Argument type, or list of argument type and [additional arguments](#fields-override). |
 | `into`   | Copy from receiver into argument, instead of from argument into receiver. |
+| `prefix` | Method name part before argument type name, to [distinguish](#method-names) methods. |
 | `mode`   | `FullCopy` (default) or [`OnlySet`](#onlyset-mode). |
 | `rename` | Map of receiver field names into argument field names. |
 | `except` | List of destination fields not copied, or `true` for all unmatched. |
@@ -134,6 +135,28 @@ Method name is `CopyFrom` or `CopyInto` (`SetFrom`/`SetInto` in `OnlySet` mode)
 followed by argument type name. Type name is omitted if it is the same as receiver
 type name: `func (d *User) CopyFrom(s *models.User)`.
 Destination is always named `d`, and source is `s`.
+
+### Method names
+
+Arguments with the same type name from different packages produce the same
+method name, and generation fails with `duplicate method CopyFromUser`.
+Set `prefix` to add it before the argument type name:
+
+```yaml
+methods:
+  UserRow:
+    - arg: example.com/app/models.User
+    - arg: example.com/app/api.User
+      prefix: API
+```
+
+```go
+func (d *UserRow) CopyFromUser(s *models.User)
+func (d *UserRow) CopyFromAPIUser(s *api.User)
+```
+
+If argument type name is omitted (same as receiver type name), method name ends
+with the prefix: `func (d *User) CopyFromAPI(s *api.User)`.
 
 ## Fields matching
 

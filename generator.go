@@ -281,11 +281,17 @@ func (g *fileGen) method(rname string, m method) error {
 	} else {
 		mname += "From"
 	}
+	if m.Prefix != "" {
+		if !token.IsIdentifier("X" + m.Prefix) {
+			return fmt.Errorf("prefix %q is not a valid identifier part", m.Prefix)
+		}
+		mname += m.Prefix
+	}
 	if aname != rname {
 		mname += aname
 	}
 	if g.methods[rname+"."+mname] {
-		return fmt.Errorf("duplicate method %s", mname)
+		return fmt.Errorf("duplicate method %s, set prefix to distinguish it", mname)
 	}
 	g.methods[rname+"."+mname] = true
 	if obj, _, _ := types.LookupFieldOrMethod(types.NewPointer(rnamed), false, g.pkg.Types, mname); obj != nil {
